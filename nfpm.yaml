@@ -1,0 +1,38 @@
+name: headscale
+arch: amd64
+platform: linux
+version: 0.27.1-custom
+maintainer: Custom Build
+description: |
+  Open source implementation of the Tailscale control server.
+  Custom build with enhanced pending registration logging.
+vendor: headscale
+homepage: https://github.com/juanfont/headscale
+license: BSD-3-Clause
+section: net
+priority: optional
+
+contents:
+  - src: ./headscale
+    dst: /usr/bin/headscale
+
+  - src: ./config-example.yaml
+    dst: /etc/headscale/config.yaml
+    type: config|noreplace
+    file_info:
+      mode: 0644
+
+  - src: ./packaging/systemd/headscale.service
+    dst: /usr/lib/systemd/system/headscale.service
+
+  - dst: /var/lib/headscale
+    type: dir
+
+  - src: LICENSE
+    dst: /usr/share/doc/headscale/copyright
+
+scripts:
+  postinstall: ./packaging/deb/postinst
+  postremove: ./packaging/deb/postrm
+  preremove: ./packaging/deb/prerm
+

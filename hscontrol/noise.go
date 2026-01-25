@@ -42,6 +42,7 @@ type noiseServer struct {
 	conn           *controlbase.Conn
 	machineKey     key.MachinePublic
 	nodeKey        key.NodePublic
+	remoteAddr     string
 
 	// EarlyNoise-related stuff
 	challenge       key.ChallengePrivate
@@ -70,8 +71,9 @@ func (h *Headscale) NoiseUpgradeHandler(
 	}
 
 	noiseServer := noiseServer{
-		headscale: h,
-		challenge: key.NewChallenge(),
+		headscale:  h,
+		challenge:  key.NewChallenge(),
+		remoteAddr: req.RemoteAddr,
 	}
 
 	noiseConn, err := controlhttpserver.AcceptHTTP(
@@ -257,7 +259,7 @@ func (ns *noiseServer) NoiseRegistrationHandler(
 
 		ns.nodeKey = regReq.NodeKey
 
-		resp, err = ns.headscale.handleRegister(req.Context(), regReq, ns.conn.Peer())
+		resp, err = ns.headscale.handleRegister(req.Context(), regReq, ns.conn.Peer(), ns.remoteAddr)
 		if err != nil {
 			var httpErr HTTPError
 			if errors.As(err, &httpErr) {

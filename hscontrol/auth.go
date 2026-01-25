@@ -29,6 +29,7 @@ func (h *Headscale) handleRegister(
 	ctx context.Context,
 	req tailcfg.RegisterRequest,
 	machineKey key.MachinePublic,
+	remoteAddr string,
 ) (*tailcfg.RegisterResponse, error) {
 	// Check for logout/expiry FIRST, before checking auth key.
 	// Tailscale clients may send logout requests with BOTH a past expiry AND an auth key.
@@ -104,7 +105,7 @@ func (h *Headscale) handleRegister(
 	// node has already started the registration process and we should wait for
 	// it to finish the original registration.
 	if req.Followup != "" {
-		return h.waitForFollowup(ctx, req, machineKey)
+		return h.waitForFollowup(ctx, req, machineKey, remoteAddr)
 	}
 
 	// Pre authenticated keys are handled slightly different than interactive
@@ -125,7 +126,7 @@ func (h *Headscale) handleRegister(
 		return resp, nil
 	}
 
-	resp, err := h.handleRegisterInteractive(req, machineKey)
+	resp, err := h.handleRegisterInteractive(req, machineKey, remoteAddr)
 	if err != nil {
 		return nil, fmt.Errorf("handling register interactive: %w", err)
 	}
@@ -252,6 +253,7 @@ func (h *Headscale) waitForFollowup(
 	ctx context.Context,
 	req tailcfg.RegisterRequest,
 	machineKey key.MachinePublic,
+	remoteAddr string,
 ) (*tailcfg.RegisterResponse, error) {
 	fu, err := url.Parse(req.Followup)
 	if err != nil {
@@ -270,14 +272,14 @@ func (h *Headscale) waitForFollowup(
 		case node := <-reg.Registered:
 			if node == nil {
 				// registration is expired in the cache, instruct the client to try a new registration
-				return h.reqToNewRegisterResponse(req, machineKey)
+				return h.reqToNewRegisterResponse(req, machineKey, remoteAddr)
 			}
 			return nodeToRegisterResponse(node.View()), nil
 		}
 	}
 
 	// if the follow-up registration isn't found anymore, instruct the client to try a new registration
-	return h.reqToNewRegisterResponse(req, machineKey)
+	return h.reqToNewRegisterResponse(req, machineKey, remoteAddr)
 }
 
 // reqToNewRegisterResponse refreshes the registration flow by creating a new
@@ -286,6 +288,7 @@ func (h *Headscale) waitForFollowup(
 func (h *Headscale) reqToNewRegisterResponse(
 	req tailcfg.RegisterRequest,
 	machineKey key.MachinePublic,
+	remoteAddr string,
 ) (*tailcfg.RegisterResponse, error) {
 	newRegID, err := types.NewRegistrationID()
 	if err != nil {
@@ -317,7 +320,15 @@ func (h *Headscale) reqToNewRegisterResponse(
 		nodeToRegister.Node.Expiry = &req.Expiry
 	}
 
-	log.Info().Msgf("New followup node registration using key: %s", newRegID)
+	log.Info().
+		Str("registration_id", newRegID.String()).
+		Str("remote_addr", remoteAddr).
+		Str("hostname", hostname).
+		Str("os", hostinfo.OS).
+		Str("os_version", hostinfo.OSVersion).
+		Str("device_model", hostinfo.DeviceModel).
+		Str("client_version", hostinfo.IPNVersion).
+		Msg("Node pending registration (followup), waiting for authentication")
 	h.state.SetRegistrationCacheEntry(newRegID, nodeToRegister)
 
 	return &tailcfg.RegisterResponse{
@@ -403,6 +414,7 @@ func (h *Headscale) handleRegisterWithAuthKey(
 func (h *Headscale) handleRegisterInteractive(
 	req tailcfg.RegisterRequest,
 	machineKey key.MachinePublic,
+	remoteAddr string,
 ) (*tailcfg.RegisterResponse, error) {
 	registrationId, err := types.NewRegistrationID()
 	if err != nil {
@@ -452,7 +464,15 @@ func (h *Headscale) handleRegisterInteractive(
 		nodeToRegister,
 	)
 
-	log.Info().Msgf("Starting node registration using key: %s", registrationId)
+	log.Info().
+		Str("registration_id", registrationId.String()).
+		Str("remote_addr", remoteAddr).
+		Str("hostname", hostname).
+		Str("os", hostinfo.OS).
+		Str("os_version", hostinfo.OSVersion).
+		Str("device_model", hostinfo.DeviceModel).
+		Str("client_version", hostinfo.IPNVersion).
+		Msg("Node pending registration, waiting for authentication")
 
 	return &tailcfg.RegisterResponse{
 		AuthURL: h.authProvider.AuthURL(registrationId),
