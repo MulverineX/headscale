@@ -15,14 +15,10 @@ import (
 )
 
 const (
-	batchSize    = 100
-	batchTimeout = 500 * time.Millisecond
-)
-
-const (
-	put    = 1
-	del    = 2
-	update = 3
+	put             = 1
+	del             = 2
+	update          = 3
+	rebuildPeerMaps = 4
 )
 
 const prometheusNamespace = "headscale"
@@ -91,9 +87,12 @@ type NodeStore struct {
 
 	peersFunc  PeersFunc
 	writeQueue chan work
+
+	batchSize    int
+	batchTimeout time.Duration
 }
 
-func NewNodeStore(allNodes types.Nodes, peersFunc PeersFunc) *NodeStore {
+func NewNodeStore(allNodes types.Nodes, peersFunc PeersFunc, batchSize int, batchTimeout time.Duration) *NodeStore {
 	nodes := make(map[types.NodeID]types.Node, len(allNodes))
 	for _, n := range allNodes {
 		nodes[n.ID] = *n
@@ -101,7 +100,9 @@ func NewNodeStore(allNodes types.Nodes, peersFunc PeersFunc) *NodeStore {
 	snap := snapshotFromNodes(nodes, peersFunc)
 
 	store := &NodeStore{
-		peersFunc: peersFunc,
+		peersFunc:    peersFunc,
+		batchSize:    batchSize,
+		batchTimeout: batchTimeout,
 	}
 	store.data.Store(&snap)
 
@@ -142,6 +143,8 @@ type work struct {
 	updateFn   UpdateNodeFunc
 	result     chan struct{}
 	nodeResult chan types.NodeView // Channel to return the resulting node after batch application
+	// For rebuildPeerMaps operation
+	rebuildResult chan struct{}
 }
 
 // PutNode adds or updates a node in the store.
@@ -246,9 +249,10 @@ func (s *NodeStore) Stop() {
 
 // processWrite processes the write queue in batches.
 func (s *NodeStore) processWrite() {
-	c := time.NewTicker(batchTimeout)
+	c := time.NewTicker(s.batchTimeout)
 	defer c.Stop()
-	batch := make([]work, 0, batchSize)
+
+	batch := make([]work, 0, s.batchSize)
 
 	for {
 		select {
@@ -261,17 +265,19 @@ func (s *NodeStore) processWrite() {
 				return
 			}
 			batch = append(batch, w)
-			if len(batch) >= batchSize {
+			if len(batch) >= s.batchSize {
 				s.applyBatch(batch)
 				batch = batch[:0]
-				c.Reset(batchTimeout)
+
+				c.Reset(s.batchTimeout)
 			}
 		case <-c.C:
 			if len(batch) != 0 {
 				s.applyBatch(batch)
 				batch = batch[:0]
 			}
-			c.Reset(batchTimeout)
+
+			c.Reset(s.batchTimeout)
 		}
 	}
 }
@@ -298,6 +304,9 @@ func (s *NodeStore) applyBatch(batch []work) {
 	// Track which work items need node results
 	nodeResultRequests := make(map[types.NodeID][]*work)
 
+	// Track rebuildPeerMaps operations
+	var rebuildOps []*work
+
 	for i := range batch {
 		w := &batch[i]
 		switch w.op {
@@ -321,6 +330,10 @@ func (s *NodeStore) applyBatch(batch []work) {
 			if w.nodeResult != nil {
 				nodeResultRequests[w.nodeID] = append(nodeResultRequests[w.nodeID], w)
 			}
+		case rebuildPeerMaps:
+			// rebuildPeerMaps doesn't modify nodes, it just forces the snapshot rebuild
+			// below to recalculate peer relationships using the current peersFunc
+			rebuildOps = append(rebuildOps, w)
 		}
 	}
 
@@ -347,9 +360,16 @@ func (s *NodeStore) applyBatch(batch []work) {
 		}
 	}
 
-	// Signal completion for all work items
+	// Signal completion for rebuildPeerMaps operations
+	for _, w := range rebuildOps {
+		close(w.rebuildResult)
+	}
+
+	// Signal completion for all other work items
 	for _, w := range batch {
-		close(w.result)
+		if w.op != rebuildPeerMaps {
+			close(w.result)
+		}
 	}
 }
 
@@ -388,7 +408,7 @@ func snapshotFromNodes(nodes map[types.NodeID]types.Node, peersFunc PeersFunc) S
 	// Build nodesByUser, nodesByNodeKey, and nodesByMachineKey maps
 	for _, n := range nodes {
 		nodeView := n.View()
-		userID := types.UserID(n.UserID)
+		userID := n.TypedUserID()
 
 		newSnap.nodesByUser[userID] = append(newSnap.nodesByUser[userID], nodeView)
 		newSnap.nodesByNodeKey[n.NodeKey] = nodeView
@@ -489,15 +509,27 @@ func (s *NodeStore) DebugString() string {
 	sb.WriteString(fmt.Sprintf("Users with Nodes: %d\n", len(snapshot.nodesByUser)))
 	sb.WriteString("\n")
 
-	// User distribution
-	sb.WriteString("Nodes by User:\n")
+	// User distribution (shows internal UserID tracking, not display owner)
+	sb.WriteString("Nodes by Internal User ID:\n")
 	for userID, nodes := range snapshot.nodesByUser {
 		if len(nodes) > 0 {
 			userName := "unknown"
+			taggedCount := 0
 			if len(nodes) > 0 && nodes[0].Valid() {
-				userName = nodes[0].User().Name
+				userName = nodes[0].User().Name()
+				// Count tagged nodes (which have UserID set but are owned by "tagged-devices")
+				for _, n := range nodes {
+					if n.IsTagged() {
+						taggedCount++
+					}
+				}
 			}
-			sb.WriteString(fmt.Sprintf("  - User %d (%s): %d nodes\n", userID, userName, len(nodes)))
+
+			if taggedCount > 0 {
+				sb.WriteString(fmt.Sprintf("  - User %d (%s): %d nodes (%d tagged)\n", userID, userName, len(nodes), taggedCount))
+			} else {
+				sb.WriteString(fmt.Sprintf("  - User %d (%s): %d nodes\n", userID, userName, len(nodes)))
+			}
 		}
 	}
 	sb.WriteString("\n")
@@ -544,6 +576,22 @@ func (s *NodeStore) ListPeers(id types.NodeID) views.Slice[types.NodeView] {
 	nodeStoreOperations.WithLabelValues("list_peers").Inc()
 
 	return views.SliceOf(s.data.Load().peersByNode[id])
+}
+
+// RebuildPeerMaps rebuilds the peer relationship map using the current peersFunc.
+// This must be called after policy changes because peersFunc uses PolicyManager's
+// filters to determine which nodes can see each other. Without rebuilding, the
+// peer map would use stale filter data until the next node add/delete.
+func (s *NodeStore) RebuildPeerMaps() {
+	result := make(chan struct{})
+
+	w := work{
+		op:            rebuildPeerMaps,
+		rebuildResult: result,
+	}
+
+	s.writeQueue <- w
+	<-result
 }
 
 // ListNodesByUser returns a slice of all nodes for a given user ID.

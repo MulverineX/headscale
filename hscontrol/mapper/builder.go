@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/juanfont/headscale/hscontrol/policy"
-	"github.com/juanfont/headscale/hscontrol/policy/matcher"
 	"github.com/juanfont/headscale/hscontrol/types"
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/views"
@@ -30,10 +29,8 @@ type debugType string
 const (
 	fullResponseDebug   debugType = "full"
 	selfResponseDebug   debugType = "self"
-	patchResponseDebug  debugType = "patch"
-	removeResponseDebug debugType = "remove"
 	changeResponseDebug debugType = "change"
-	derpResponseDebug   debugType = "derp"
+	policyResponseDebug debugType = "policy"
 )
 
 // NewMapResponseBuilder creates a new builder with basic fields set.
@@ -77,8 +74,9 @@ func (b *MapResponseBuilder) WithSelfNode() *MapResponseBuilder {
 	}
 
 	_, matchers := b.mapper.state.Filter()
-	tailnode, err := tailNode(
-		nv, b.capVer, b.mapper.state,
+
+	tailnode, err := nv.TailNode(
+		b.capVer,
 		func(id types.NodeID) []netip.Prefix {
 			return policy.ReduceRoutes(nv, b.mapper.state.GetNodePrimaryRoutes(id), matchers)
 		},
@@ -181,6 +179,9 @@ func (b *MapResponseBuilder) WithPacketFilters() *MapResponseBuilder {
 		return b
 	}
 
+	// FilterForNode returns rules already reduced to only those relevant for this node.
+	// For autogroup:self policies, it returns per-node compiled rules.
+	// For global policies, it returns the global filter reduced for this node.
 	filter, err := b.mapper.state.FilterForNode(node)
 	if err != nil {
 		b.addError(err)
@@ -192,7 +193,7 @@ func (b *MapResponseBuilder) WithPacketFilters() *MapResponseBuilder {
 	// new PacketFilters field and "base" allows us to send a full update when we
 	// have to send an empty list, avoiding the hack in the else block.
 	b.resp.PacketFilters = map[string][]tailcfg.FilterRule{
-		"base": policy.ReduceFilterRules(node, filter),
+		"base": filter,
 	}
 
 	return b
@@ -231,25 +232,26 @@ func (b *MapResponseBuilder) buildTailPeers(peers views.Slice[types.NodeView]) (
 		return nil, errors.New("node not found")
 	}
 
-	// Use per-node filter to handle autogroup:self
-	filter, err := b.mapper.state.FilterForNode(node)
+	// Get unreduced matchers for peer relationship determination.
+	// MatchersForNode returns unreduced matchers that include all rules where the node
+	// could be either source or destination. This is different from FilterForNode which
+	// returns reduced rules for packet filtering (only rules where node is destination).
+	matchers, err := b.mapper.state.MatchersForNode(node)
 	if err != nil {
 		return nil, err
 	}
 
-	matchers := matcher.MatchesFromFilterRules(filter)
-
 	// If there are filter rules present, see if there are any nodes that cannot
 	// access each-other at all and remove them from the peers.
 	var changedViews views.Slice[types.NodeView]
-	if len(filter) > 0 {
+	if len(matchers) > 0 {
 		changedViews = policy.ReduceNodes(node, peers, matchers)
 	} else {
 		changedViews = peers
 	}
 
-	tailPeers, err := tailNodes(
-		changedViews, b.capVer, b.mapper.state,
+	tailPeers, err := types.TailNodes(
+		changedViews, b.capVer,
 		func(id types.NodeID) []netip.Prefix {
 			return policy.ReduceRoutes(node, b.mapper.state.GetNodePrimaryRoutes(id), matchers)
 		},
