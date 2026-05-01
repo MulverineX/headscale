@@ -503,6 +503,29 @@
         ]
       }
     },
+    "/api/v1/pending-registrations": {
+      "get": {
+        "summary": "--- Pending registrations ---",
+        "operationId": "HeadscaleService_ListPendingRegistrations",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1ListPendingRegistrationsResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "tags": [
+          "HeadscaleService"
+        ]
+      }
+    },
     "/api/v1/policy": {
       "get": {
         "summary": "--- Policy start ---",
@@ -1101,6 +1124,18 @@
         }
       }
     },
+    "v1ListPendingRegistrationsResponse": {
+      "type": "object",
+      "properties": {
+        "registrations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1PendingRegistration"
+          }
+        }
+      }
+    },
     "v1ListPreAuthKeysResponse": {
       "type": "object",
       "properties": {
@@ -1201,6 +1236,27 @@
           "items": {
             "type": "string"
           }
+        }
+      }
+    },
+    "v1PendingRegistration": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "hostname": {
+          "type": "string"
+        },
+        "machineKey": {
+          "type": "string"
+        },
+        "nodeKey": {
+          "type": "string"
+        },
+        "expiry": {
+          "type": "string",
+          "format": "date-time"
         }
       }
     },
